@@ -1,0 +1,7 @@
+*venv*
+*cred*
+*__pycache__*
+Data/
+*logs/*
+*.err
+*.out
