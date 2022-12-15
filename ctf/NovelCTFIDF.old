@@ -1,0 +1,67 @@
+import json
+import concurrent.futures
+import math
+import os
+import numpy as np
+
+from pyspark.ml import Pipeline
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import min,max,col,collect_set
+
+import glob
+import re
+
+
+def main():
+    spark = SparkSession.builder \
+        .appName("NLP CTF-IDF by keyword") \
+        .config("spark.driver.memory","460g") \
+        .config("spark.executor.memory","128g") \
+        .getOrCreate()
+    print('Loading Index')
+    df_index = spark.read.parquet('../Data/df_index2.parquet')
+    print('Loading Links')
+    df_links = spark.read.parquet('../Data/df_links2.parquet')
+    print('Loading Tokens')
+    df_content = spark.read.parquet('../Data/processed/tokens/*.parquet').select('Content_Index','cleanTokens')
+    df_trimmed = spark.read.parquet('../Data/df_content3.parquet').select('Content_Index','TrimmedLink_ID')
+    df_content = df_content.join(df_trimmed, 'Content_Index')
+    print('Loading Complete')
+    # Create Keyword Links
+    Link2Keyword = df_index.rdd.map(lambda x: (x['Link_ID'], x['Keyword'])).toDF(['Link_ID', 'Keyword'])
+    Link2Trim = df_links.select('Link_ID', 'TrimmedLink_ID')
+    Link2Content = df_content.select('TrimmedLink_ID', 'Content_Index')
+    Keys2Content = Link2Keyword.join(Link2Trim, 'Link_ID').select('Keyword', 'TrimmedLink_ID').groupby(
+        'TrimmedLink_ID').agg(collect_set('Keyword').alias('Keyword')).join(Link2Content, 'TrimmedLink_ID').select(
+        'Keyword', 'Content_Index')
+    KeysExpanded = Keys2Content.rdd.flatMap(
+        lambda x: [(keyword, x['Content_Index']) for keyword in x['Keyword']]).toDF(['Key','Content_Index'])
+    
+    # TF-IDF
+    N = 113
+    tokens = KeysExpanded.join(df_content,'Content_Index').select('Key','cleanTokens')
+    term2one = tokens.rdd.flatMap(lambda x: [((x[0], word), 1) for word in x[1].split()])  # ((doc,word),1)
+    termPerDoc = term2one.map(lambda x: (x[0][0],1)).reduceByKey(lambda x, y: x + y) # (doc, K)
+    termReduced = term2one.reduceByKey(lambda x, y: x + y)  # ((doc,word),N)
+    termDivide = termReduced.map(lambda x: (x[0][0],(x[0][1],x[1]))).join(termPerDoc).map(lambda x: ((x[0],x[1][0][0]),x[1][0][1]/x[1][1])) # ((doc,word),N/K)
+    tf = termDivide.map(lambda x: (x[0][1], (x[0][0], x[1])))  # (word, (doc, n))
+    presence = termReduced.map(lambda x: (x[0][1], (x[0][0], x[1], 1))).map(lambda x: (x[0], x[1][2]))  # (word, 1)
+    presenceReduced = presence.reduceByKey(lambda x, y: x + y).filter(lambda x: (N * 0.80) > x[1] > (N * 0.05))  # (word, k)
+    idf = presenceReduced.map(lambda x: (x[0], float(np.log10(N / x[1]))))
+    tfidf = tf.join(idf).map(lambda x: (x[1][0][0], x[0], x[1][0][1], x[1][1], x[1][0][1] * x[1][1])).toDF(['Cluster', 'Token', 'TF', 'IDF', 'TFIDF']).sort(col('TFIDF').desc()).cache()
+    
+    DistinctKeys = [row[0] for row in tfidf.select('Cluster').distinct().collect()]
+    out = {}
+    for key in DistinctKeys:
+        out[key] = [(row[0],row[1]) for row in tfidf.filter(tfidf.Cluster==key).select('Token','TFIDF').take(10)]
+    print(out)
+if __name__ == '__main__':
+    main()
+
+
+
+
+
+
+
+

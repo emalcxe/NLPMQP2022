@@ -19,5 +19,4 @@ if [ ! -d "$HOME/spark" ]; then
 	rm ./*.tgz*
 fi
 export SPARK_HOME=~/spark/spark-3.2.2-bin-hadoop3.2
-export CLUSTER_HOME=~/cluster
 export PATH="$SPARK_HOME/bin:$PATH"
